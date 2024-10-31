@@ -1,0 +1,1007 @@
+#!/usr/bin/perl
+#
+# Mayy have to change the next line so that mcnp_pstudy knows
+# where to find mcnp5. Should be something like this:
+# $MCNP = "/Volumes/fbb/fbrown/mcnp6_std/MCNP6/bin/mcnp6";
+  $MCNP = `/mnt/nfs/home/zeitz_d/mcnp6.3/mcnp-6.3.0-Linux/bin/mcnp6`;  chomp($MCNP);
+  $MCNP || die("*** change the line above to the location of MCNP on your system\n");
+
+##########################################################################
+# from LA-UR-04-2506
+#
+# mcnp_pstudy - perform MCNP parameter studies
+#
+#  Author:      FB Brown
+#  References:  LA-UR-04-0499,  LA-UR-04-2506
+#  History:
+#    6/2003 - original, revised 2/2004, 6/2005
+#    1/2010 - released with MCNP5-1.51
+#    5/2010 - minor fixes for parsing tallies
+#    7/2010 - allow for perturbed tallies
+#    9/2010 - released with MCNP5-1.60
+#   11/2010 - mods to permit inner/outer specs for each param
+#           - added sampling from beta(a,b) PDF
+#           - allow mcnp input lines that start with "#"
+#           - allow tied "outer" parameters
+#           - added sampling from lognormal PDF
+#   10/2011 - option for status check, mbsub vs bsub (AJZ)
+#           - prevent infinite loop if last line has no "\n" (FBB)
+#           - run/rerun/submit/resubmit can be done with multiple
+#             cases per job, running concurrently (-ppn N)  (FBB)
+#
+# Variable definition lines:
+#
+#     c @@@  symbol = val
+#     c @@@  symbol = val1 val2 ... valn
+#     c @@@  symbol = normal     n  ave sig
+#     c @@@  symbol = lognormal  n  ave sig
+#     c @@@  symbol = uniform    n  low high
+#     c @@@  symbol = beta       n  a   b
+#     c @@@  symbol = repeat n
+#     c @@@  symbol = ( expression )
+#     c @@@  constraint = ( logical-expression )
+#     c @@@  tied   = list-of-symbols
+#     c @@@  options= list-of-cmd-line-options
+#
+#   notes:
+#     (1) For values, strings with embedded whitespace not allowed
+#     (2) Be careful about length of lines after substitution
+#     (3) "expression" may include arithmetic, previously defined 
+#         symbols, parentheses. The outer set of parenthese is
+#         REQUIRED. The result must be a single scalar value.
+#     (4) "constraint" is a literal. The logical-expression may
+#         contain previously defined symbols, parentheses, logical
+#         operators, & constants. The outer set of parentheses
+#         is REQUIRED. The result must be true or false.
+#     (5) "repeat n" creates a list of integers 1..n. This is
+#         convenient for creating a dummy variable for the 
+#         purpose of repeating a calculation
+#     (6) The counts "n" can be integers or a previously defined
+#         symbol which is a single integer. Other parameters
+#         (ave sig low high val1..valn) can be defined in terms
+#         of any previously-defined symbol.
+#     (7) Any of the "c @@@" lines can be continued by ending the
+#         line with a backslash character. The continuation lines
+#         should start with "c @@@".
+#     (8) "tied" is a literal, to declare a list of "outer"
+#         parameters that are tied together. Tied parameter lists
+#         must have the same number of entries.
+#     (9) "options" is a literal. Command line options (see below)
+#         may be specified within the input file. Options are set
+#         once, at the beginning of the setup, except for "-inner"
+#         and "-outer" which take effect immediately for subsequent
+#         parameter specifications.
+#
+# If -setup is present, job files will be created in a filetree as
+# follows:
+#            $JOBDIR/$CASE$N/$JOB
+#
+#       (1) $JOBDIR is created if it does not exist
+#       (2) $N has up to $CASENUM digits, padded on the left with '0'
+# 
+# pstudy command line options: 
+#
+#      Note:  these can also be embedded in the MCNP input file,
+#             on lines beginning with    'c @@@ OPTIONS =   '
+#
+#   -jobdir d      = use directory 'd' as the $JOBDIR. Can be absolute
+#                    or relative. Created if doesn't exist
+#   -case   c      = use 'c' for $CASE in creating case names.
+#   -casenum n     = use 'n' digits appended to the case name,
+#                    eg, 001, 002, ... for n=3
+#   -inp  j        = the mcnp input file created in each directory 
+#                    will be called 'j'.  Default is 'inp'.
+#   -i  infile     = the template input file (with substitution commands
+#                    for pstudy) is file 'infile'
+#   -log logfile   = use 'logfile' for saving the summary results
+#   -mcnp  m       = 'm' is used as the run command. 'm' may be
+#                    the location of mcnp or may be a string of 
+#                    commands, such as  'mpirun -n 4 ~fbrown/bin/mcnp'
+#   -mcnp_opts m   = 'm' is appended to the mcnp run line. May be a
+#                    series of options, eg,  'o=outx  tasks 4'
+#   -msub_opts b   = 'b' is the set of options for a msub command.
+#                    Only used if the -submit option is invoked.
+#                    By default, msub is used for submitting jobs.
+#   -bsub_opts b   = 'b' is the set of options for a bsub command.
+#                    Only used if the -submit option is invoked.
+#		     Sets submission command to bsub (instead of msub).
+#   -outer
+#   -inner         = If -outer is selected (the default), then jobs are 
+#                    created for all possible combinations of the 
+#                    parameters handled by pstudy. If -inner is selected,
+#                    the various parameters are substituted serially.
+#                    For -outer, the number of jobs is the product of
+#                    the number of times each parameter specified. For
+#                    -inner, the number of jobs is the max of the times
+#                    any parameter is specified.
+#   -debug
+#   -verbose       = print extra output.
+#
+#   -setup         = setup all mcnp input files. (Don't run or submit
+#                    unless -submit or -run is specified.)
+#   -submit        = submit the jobs using msub (default) or bsub.
+#   -run           = run the jobs now, on the current machine.
+#   -status        = report status from the file system whether cases are 
+#		     running or done.
+#   -rerun
+#   -resubmit      = resubmit or rerun any jobs which did not run to 
+#                    completion and produce a 'case_finished' file.
+#
+#    -ppn N        = number of processes to run per node (number of cases
+#                    to run concurrently per node). 
+# 
+#   -collect       = collect results from each job & average them.
+#   -avgonly       = only print the average results
+#   -symlink 'files...'
+#                  = create symbolic links in each case directory to the
+#                    listed files. Can use Unix wildcards in filenames.
+#                    Separate files in list by a blank. Must use double
+#                    or single quotes around list if more than 1 file.
+# 
+# Typical usage:
+#
+#   mcnp_pstudy.pl -i godiva   \
+#      -mcnp 'mpirun -np 4 /usr/local/codes/mcnp/IRIX64/mcnp5.mpi' \
+#      -mcnp_opts 'tasks 4' -bsub_opts '-n 4 -W 10'   -setup -submit
+#
+#   mcnp_pstudy.pl -i godiva  -setup
+#   mcnp_pstudy.pl -i godiva  -run  -collect
+# 
+#
+# Sample input file
+#
+#      Godiva (title line)
+#      c
+#      c @@@ # godiva problem with varying density & radius
+#      c @@@ OPTIONS =  -outer
+#      c @@@ OPTIONS =  -log gd.txt  
+#      c @@@ OPTIONS =  -jobdir /Users/fbrown/GD2
+#      c
+#      c @@@  DEN = 18.  18.74   19.
+#      c @@@  RAD = 8.   8.741  9.
+#      c
+#      c below is normal MCNP input, with parameters
+#      c
+#      1    1  -DEN  -1
+#      2    0           1
+#       
+#      1    so RAD
+#       
+#      kcode 1000 1.0 10 40
+#      ksrc  0. 0. 0.
+#      imp:n 1 0
+#      m1    92235 -94.73  92238 -5.27
+#      prdmp 2j 1 99999999
+#
+#   Using the default -outer, 9 cases will be set up & run --
+#   all combinations of DEN & RAD.  If -inner is used, then only 3
+#   cases would be run --   18. & 8.,  18.74 & 8.741,  19. & 9.
+#
+##########################################################################
+#### srand(12345);         ### for repeatability in testing
+
+##### environment info
+$USER = $ENV{'USER'};
+$OS   = `uname`;     chomp($OS);
+$HOST = `hostname`;  chomp($HOST);
+$WORK = `pwd`;       chomp($WORK);
+
+##### global options - defaults
+$JOBDIR    = '.';
+$CASE      = 'case';
+$CASENUM   = 3;
+$JOB       = 'inp';
+$IN        = '-';
+$LOG       = 'log.txt';
+$MCNP_OPTS = 'wwinp= ../wwinp';
+$SUB_OPTS  = '';
+$SUB       = 'msub -N';
+$PPN       = 1;
+$SETUP     = '';
+$SUBMIT    = '';
+$RESUBMIT  = '';
+$RERUN     = '';
+$RUN       = '';
+$STATUS    = '';
+$COLLECT   = '';
+$AVGONLY   = '';
+$DEBUG     = '';
+$OUTER     = 'outer';
+undef @SYMLINKS;
+
+##### get global options from command-line args
+  &get_global_opts( @ARGV );
+
+##### parse the input to pick up substitution parameters & tally identifiers
+  &parse_input;
+  &parse_tally_info;
+  &parse_symlink_info;
+
+##### get absolute path for $JOBDIR, then create $JOBDIR if needed
+  if( $JOBDIR !~ /^\// ) { $JOBDIR = "$WORK/$JOBDIR"; }
+
+  if( $SETUP && ! -d $JOBDIR ) {
+    print "***** creating $JOBDIR\n";
+    mkdir $JOBDIR, 0750 || die("***** can't create $JOBDIR\n");
+  }
+
+##### open the log file
+  open(LOG, ">>$LOG");
+
+##### determine the total number of cases & setup subdir names
+  $NSYM   = @SYM;
+  $NCASES_OUTER = 1;
+  $NCASES_INNER = 1;
+  for $s (@SYM) {
+    $num = &symcon($data{$s}[3]);
+    if(    $data{$s}[2] eq 'outer' ) { $NCASES_OUTER *= $num; }
+    elsif( $data{$s}[2] eq 'inner' ) {
+      if( $NCASES_INNER < $num )     { $NCASES_INNER  = $num; }
+    }
+  }
+  $NCASES = $NCASES_OUTER * $NCASES_INNER;
+  print "\n***** Number of cases - OUTER = $NCASES_OUTER\n";
+  print   "***** Number of cases - INNER = $NCASES_INNER\n";
+  print "\n***** Number of cases - TOTAL = $NCASES\n\n";
+
+  # adjust $CASENUM if needed
+  my $n = length("$NCASES");
+  if( $n>$CASENUM ) { 
+    print "***** CASENUM changed from $CASENUM to $n\n";
+    $CASENUM = $n; 
+  }
+
+  # set sub-directory names for cases
+  my $k;
+  for( $k=1; $k<=$NCASES; $k++ ) {
+    $CASENAMES[$k] = $CASE . "0"x($CASENUM-length($k)) . $k;
+  }
+
+##### get the case parameters
+  if( $SETUP ) {
+    $KASE = 0;
+    while( &next_case <= $NCASES ) { &get_case_params; }
+  }
+
+##### set up the job files for all cases
+  if( $SETUP ) {
+    print LOG "\nSETUP\n\n";
+    for( $KASE=0;  &next_case <= $NCASES; ) {
+  
+      # create the subdir for case
+      $CASEDIR = "$JOBDIR/$CASENAMES[$KASE]_$VAL[$KASE][0]_$VAL[$KASE][4]_$VAL[$KASE][3]";
+      if( ! -d "$CASEDIR" ) {
+        mkdir  "$CASEDIR", 0750 || die("***** can't create case dir $CASEDIR\n");
+      }
+      $OUT = "$CASEDIR/$JOB";
+
+      # perform substitutions & create job file for case
+      &substitute_case_params;
+
+      # create symbolic links in case subdirectory
+      foreach $f (keys(%symlink_files)) {
+        if( ! -e "$CASEDIR/$f" ) { symlink $symlink_files{$f}, "$CASEDIR/$f"; }
+      }
+
+      # logfile entries
+      print LOG "$CASENAMES[$KASE]\t$CASEDIR\n";
+      for( $k=0; $k<$NSYM; $k++) {
+        print LOG "\t$SYM[$k]\t$VAL[$KASE][$k]\n";
+      }
+    }
+  }
+
+##### status check - report which jobs are done
+  if( $STATUS ) {
+    print "CASEDIR\t\tSTATUS\n";
+    for( $KASE=0;  &next_case <= $NCASES; ) {
+      $CASEDIR  = "$JOBDIR/$CASENAMES[$KASE]";
+      $MYSTATUS = (-s "$CASEDIR/case_finished") ? "done" : "not done";
+      print "$CASEDIR\t\t$MYSTATUS\n";
+    }
+  }
+
+##### run or submit all cases in order
+if( $RUN || $SUBMIT || $RESUBMIT || $RERUN ) {
+  $TEMPLATE = '"
+                ( cd $CASEDIR
+		  rm -f stdout  case_finished
+		  { echo \"=============================================\"
+		    echo \"=====> Case $KASE__E_PE_TH_$VAL[$KASE][4]_$VAL[$KASE][3]\"
+		    echo \"=====>    dir  = $CASEDIR\"
+		    echo \"=====>    mcnp = $MCNP\"
+		    echo \"=====>    host = \`hostname\`\"
+		    echo \"=====>    pid  = \$\$\"
+		    echo \"=====>    date = \`date\`\"
+		    echo \"=============================================\"
+		    rm -f mcta? runtp? out? meshta? srct?
+		    ls -l 
+		    $MCNP  i=$JOB  $MCNP_OPTS
+		    [ $? = 0   ] && echo $KASE >case_finished
+		    [ -s mctal ] && echo $KASE >case_finished
+		  } 1>stdout  2>&1
+		) &
+		"';
+  $JOB_SH    = "#!/bin/bash\n";
+  $JOB_OUT   = "\nwait\n";
+  $PPN_COUNT = 0;
+  for( $KASE=0;  &next_case <= $NCASES;  ) {
+
+    $CASEDIR = "$JOBDIR/$CASENAMES[$KASE]";
+    $DONE    = (-s "$CASEDIR/case_finished") ?  'yes' : '';
+
+    if(    $RUN                 ) { $NEED='yes'; $FLAG='*run*';      }
+    elsif( $SUBMIT              ) { $NEED='yes'; $FLAG='*submit*';   }
+    elsif( $RESUBMIT &&   $DONE ) { $NEED='';    $FLAG='done';       }
+    elsif( $RESUBMIT && ! $DONE ) { $NEED='yes'; $FLAG='*resubmit*'; }
+    elsif( $RERUN    &&   $DONE ) { $NEED='';    $FLAG='done';       }
+    elsif( $RERUN    && ! $DONE ) { $NEED='yes'; $FLAG='*rerun*' ;   }
+    else                          { $NEED='';    $FLAG='';           }
+    print "\n=====> Case $KASE,\t$FLAG\tdir= $CASEDIR\n";
+
+    if( $NEED ) {
+      $PPN_COUNT += 1;
+      $JOB_SH    .= eval "$TEMPLATE";
+      $JOB_OUT   .= "cat $CASEDIR/stdout\n";
+    }
+
+    if( $PPN_COUNT==$PPN || ($KASE==$NCASES && $PPN_COUNT>0) )  {
+
+      $JOB_SH .= "$JOB_OUT\n";      $DEBUG && print "JOB-SCRIPT:\n$JOB_SH";
+      if( $RUN || $RERUN ) {               # run the case
+        system( "$JOB_SH" );
+      }
+      elsif( $SUBMIT || $RESUBMIT ) {      # submit job to queuing system
+        system(	"$SUB $CASENAMES[$KASE] $SUB_OPTS <<'__END__'
+$JOB_SH
+__END__
+   	    " );
+      }
+      $JOB_SH    = "#!/bin/bash\n";
+      $JOB_OUT   = "\nwait\n";
+      $PPN_COUNT = 0;
+    }
+  }
+}
+
+##### collect results
+if( $COLLECT ) {
+  # collect results & print
+  print LOG "\nRESULTS\n\n";
+  for( $KASE=0;  &next_case <= $NCASES; ) {
+    $CASEDIR = "$JOBDIR/$CASENAMES[$KASE]";
+    # get keff & tallies from mctal file
+    &collect_results;
+  }
+  &print_results;
+}
+
+exit;
+#-------------------------------------------------------------------------
+sub get_global_opts() {
+  # scan the arg list for keywords & set global options
+  my @args = @_;
+  # first, put any strings back together
+  { my $k, $j;
+    for( $k=0; $k<@args; ) {
+      if( $args[$k] =~ /^([\'\"])/ ) {
+        $j = $k+1;
+        while( $args[$k] !~ /$1$/  && $j<@args ) {
+          $args[$k] .= ' '.$args[$j];
+          $args[$j] = '--';
+          $j++;
+        }
+        $args[$k] = substr( $args[$k], 1,-1 );
+        $k = $j+1;
+      }
+      else { $k++; }
+    }
+  }
+  # scan the args & set globals
+  my $arg;
+  while(   $arg = shift @args  ) {
+    if(    $arg eq '-jobdir'    )  { $JOBDIR    = shift @args; }
+    elsif( $arg eq '-case'      )  { $CASE      = shift @args; }
+    elsif( $arg eq '-casenum'   )  { $CASENUM   = shift @args; }
+    elsif( $arg eq '-job'       )  { $JOB       = shift @args; }
+    elsif( $arg eq '-i'         )  { $IN        = shift @args; }
+    elsif( $arg eq '-log'       )  { $LOG       = shift @args; }
+    elsif( $arg eq '-mcnp'      )  { $MCNP      = shift @args; }
+    elsif( $arg eq '-mcnp_opts' )  { $MCNP_OPTS = shift @args; }
+    elsif( $arg eq '-bsub_opts' )  { $SUB_OPTS  = shift @args;  $SUB="bsub -J"}
+    elsif( $arg eq '-msub_opts' )  { $SUB_OPTS  = shift @args; }
+    elsif( $arg eq '-ppn'       )  { $PPN       = shift @args; }
+    elsif( $arg eq '-symlink'   )  { $SYMLINKS  = shift @args; }
+    elsif( $arg eq '-outer'     )  { $OUTER     = 'outer'; }
+    elsif( $arg eq '-inner'     )  { $OUTER     = 'inner'; }
+    elsif( $arg eq '-debug'     )  { $DEBUG     = 'yes'; }
+    elsif( $arg eq '-verbose'   )  { $DEBUG     = 'yes'; }
+    elsif( $arg eq '-v'         )  { $DEBUG     = 'yes'; }
+    elsif( $arg eq '-setup'     )  { $SETUP     = 'yes'; }
+    elsif( $arg eq '-status'    )  { $STATUS    = 'yes'; }
+    elsif( $arg eq '-submit'    )  { $SUBMIT    = 'yes'; }
+    elsif( $arg eq '-resubmit'  )  { $RESUBMIT  = 'yes'; }
+    elsif( $arg eq '-rerun'     )  { $RERUN     = 'yes'; }
+    elsif( $arg eq '-run'       )  { $RUN       = 'yes'; $COLLECT='yes'; }
+    elsif( $arg eq '-collect'   )  { $COLLECT   = 'yes'; }
+    elsif( $arg eq '-avgonly'   )  { $AVGONLY   = 'yes'; }
+    elsif( $arg eq '--'         )  { next; }
+    else { die("***** $0 error, bad arg: $arg\n"); }
+  }
+}
+#-------------------------------------------------------------------------
+sub parse_input() {
+  ##### parse the input file for substituion & control lines
+  ##### create:   %data,  @SYM
+  my @VALS, $typ, $sym, $out, $num, $ave, $sig, $xmin, $xmax, $a, $b;
+  my $nconstraint=0, $ntied=0;
+
+  ##### open input & output files (default: stdin, stdout)
+  open( IN,  "<$IN")  || die("$0: can't open $IN\n");
+
+  while( <IN> ) {
+
+    # only parse lines starting with "c @@@ " 
+    if( ! /^c\s+@@@/i ) { next; }
+
+    # pick up any continuation lines
+    while( substr($_,-2,1) eq "\\" ) { $_ = substr($_,0,-2).<IN>; }
+
+    # remove leading 'c @@@ ', commas, extra blanks, tabs, newline, carriage returns
+    chop;
+    s/\r//g;
+    s/c\s+@@@\s*/ /gi;
+    s/,/ /g   unless  /=\s*\(.*\)\s*$/;
+    s/\t/ /g;
+    s/\s*=\s*/=/;
+    s/ +/ /g;
+    s/ $//;
+    s/^ //;
+
+    undef @VALS;
+    if(    /^options=(.*)/i ) {
+      my @opts = split(' ', $1 );
+      &get_global_opts( @opts );
+    }
+    elsif( /^constraint=\((.*)\)/i ) {
+      # constraint condition
+      $nconstraint++;
+      $sym  = 'C-'.$nconstraint;  push @SYM, $sym;
+      $typ  = 'constraint';       $out  = $OUTER;
+      $num  = 1;
+      $val  = $1;
+      $data{ $sym } = [ $sym, $typ, $out, $num, $val ];
+    }
+    elsif( /^tied=(\S+(?: \S+)+)$/ ) {
+      # list of tied parameters
+      $ntied++;
+      $sym  = 'T-'.$ntied;        push @SYM, $sym;
+      $typ  = 'tied    ';         $out  = 'tied';
+      @VALS = split(' ',$1);
+      $num  = @VALS;
+      $data{ $sym } = [ $sym, $typ, $out, $num, @VALS ];
+    }
+    elsif( /^(\w+)=\((.*)\)/ ) {
+      # expression to evaluate
+      $sym  = $1;                 push @SYM, $sym;
+      $typ  = 'eval    ';         $out  = $OUTER;
+      $num  = 1;
+      $val  = $2;
+      $data{ $sym } = [ $sym, $typ, $out, $num, $val ];
+    }
+    elsif( /^(\w+)=normal (\S+) (\S+) (\S+)$/i ) {
+      # sample from normal PDF
+      $sym  = $1;                 push @SYM, $sym;
+      $typ  = 'normal  ';         $out  = $OUTER;
+      $num  = &symcon($2);
+      $ave  = $3;
+      $sig  = $4;
+      $data{ $sym } = [ $sym, $typ, $out, $num, $ave, $sig ];
+    }
+    elsif( /^(\w+)=lognormal (\S+) (\S+) (\S+)$/i ) {
+      # sample from log normal PDF
+      $sym  = $1;                 push @SYM, $sym;
+      $typ  = 'lognormal';        $out  = $OUTER;
+      $num  = &symcon($2);
+      $ave  = $3;
+      $sig  = $4;
+      $data{ $sym } = [ $sym, $typ, $out, $num, $ave, $sig ];
+    }
+    elsif( /^(\w+)=uniform (\S+) (\S+) (\S+)$/i ) {
+      # sample from uniform PDF
+      $sym  = $1;                 push @SYM, $sym;
+      $typ  = 'uniform ';         $out  = $OUTER;
+      $num  = &symcon($2);
+      $xmin = $3;
+      $xmax = $4;
+      $data{ $sym } = [ $sym, $typ, $out, $num, $xmin, $xmax ];
+    }
+    elsif( /^(\w+)=beta (\S+) (\S+) (\S+)$/i ) {
+      # sample from beta PDF, with integer params
+      $sym  = $1;                 push @SYM, $sym;
+      $typ  = 'beta    ';         $out  = $OUTER;
+      $num  = &symcon($2);
+      $a    = int($3);
+      $b    = int($4);
+      $data{ $sym } = [ $sym, $typ, $out, $num, $a, $b ];
+    }
+    elsif( /^(\w+)=repeat (\S+)$/i ) {
+      # repeat n - list of 1..n
+      $sym  = $1;                 push @SYM, $sym;
+      $typ  = 'list    ';         $out  = $OUTER;
+      $num  = &symcon($2);
+      @VALS = (1..$num);
+      $data{ $sym } = [ $sym, $typ, $out, $num, @VALS ];
+    }
+    elsif( /^(\w+)=(\S+)$/ ) {
+      # single value, constant
+      $sym  = $1;                 push @SYM, $sym;
+      $typ  = 'constant';         $out  = $OUTER;
+      $val  = $2;
+      $num  = 1;
+      $data{ $sym } = [ $sym, $typ, $out, $num, $val ];
+    }
+    elsif( /^(\w+)=(\S+(?: \S+)+)$/ ) {
+      # list of values
+      $sym  = $1;                 push @SYM, $sym;
+      $typ  = 'list    ';         $out  = $OUTER;
+      @VALS = split(' ',$2);
+      $num  = @VALS;
+      $data{ $sym } = [ $sym, $typ, $out, $num, @VALS ];
+    }
+  }
+  close(IN);
+
+  # fixup lists that are tied to others
+  { my $k, $j, $i, $base;
+    for( $k=0; $k<@SYM; $k++) {
+      if( $SYM[$k] =~ /^T-\d/ ) {
+        $base = $data{$SYM[$k]}[4];
+        for($j=0; $j<@SYM; $j++) { if( $base eq $SYM[$j] ) { last; } }
+        if( $j>=@SYM ) { die("***** error: unknown param in tied list\n"); }
+        foreach $i ((1..$data{$SYM[$k]}[3]-1)) {
+          $sym = $data{$SYM[$k]}[4+$i];
+          $data{$sym}[2] = $j;
+          if( $data{$sym}[3] != $data{$base}[3] ) {
+            die("***** error:  tied lists must have same length\n");
+          }
+        }
+      }
+    }
+  }
+
+  if( $DEBUG ) {
+    print "\n***** Parameter substitution data:\n";
+    my $k, $j, $s, $n;
+    for($k=0; $k<@SYM; $k++) {
+      $sym = $SYM[$k];
+      $typ = $data{$sym}[1];
+      $out = $data{$sym}[2];
+      $num = $data{$sym}[3];
+      if(     $typ =~ /^normal/    ) { $n = 2;}
+      elsif(  $typ =~ /lognormal/  ) { $n = 2;}
+      elsif(  $typ =~ /uniform/    ) { $n = 2; }
+      elsif(  $typ =~ /beta/       ) { $n = 2; }
+      elsif(  $typ =~ /eval/       ) { $n = 1; }
+      elsif(  $typ =~ /constraint/ ) { $n = 1; }
+      else                           { $n = $num; }
+      print "$k\t$sym\t$typ\t$out\t$num\t$data{$sym}[4]";
+      for( $j=1; $j<$n; $j++ ) { print "\t$data{$sym}[4+$j]"; }
+      print "\n";
+    }
+  }
+}
+#-------------------------------------------------------------------------
+sub parse_tally_info() {
+  ##### scan the input file, looking for tally specs
+  open(   IN,  "<$IN")  || die("$0: can't open $IN\n");
+  while( <IN> ) {
+    if( /^c /i ) { next; }
+    if( /^#/   ) { next; }
+ 
+    if( /^\s*[*+]?(fp?)0*(\d+):?[npe]?(,[npe])* /i ) {
+      push @TAL_TYP, lc($1);
+      push @TAL_NUM, $2;
+    }
+  }
+  close(IN);
+
+  if( $DEBUG ) {
+    print "\n***** Tally specs in input file:\n";
+    my $k;
+    for( $k=0; $k<@TAL_NUM; $k++) {
+      print "\t$TAL_NUM[$k]";
+    }
+    print "\n";
+  }
+}
+#-------------------------------------------------------------------------
+sub parse_symlink_info() {
+  ##### scan the input file, looking for required symbolic links
+  my $arg, $f, $g, @mopts, $in_msg=0;
+  undef %symlink_files;
+
+  # add symlinks from -mcnp_opts
+  @mopts = split(' ',$MCNP_OPTS);
+  foreach $arg (@mopts) {
+    if( $arg=~/\S+=(\S+)/ ) { $symlink_files{$1} = "$WORK/$1"; }
+  }
+  # scan the input file for symlinks needed
+  open(   IN,  "<$IN")  || die("$0: can't open $IN\n");
+  while( <IN> ) {
+    if( /^c /i   ) { next; }
+    if( /^#/     ) { next; }
+    # parse the message block
+    if( /^\s*message:/i     ) { $in_msg=1; }
+    if( $in_msg && /^\s*$/  ) { $in_msg=0; }
+    if( $in_msg ) {
+      foreach $arg (split) {
+        if( $arg=~/datapath/i ) { next; }
+        if( $arg=~/\S+=(\S+)/ ) { $symlink_files{$1} = "$WORK/$1"; }
+      }
+    }
+    # add dump files
+    elsif( /^\s*dump\s+(\S+)/i ) { $symlink_files{$1} = "$WORK/$1"; }
+  }
+  close(IN);
+
+  # get -symlink files from the command line
+  if( $SYMLINKS ) {
+    foreach $f (glob($SYMLINKS)) {
+      $g = $f;
+      $g =~ s/.*\///;  # basename
+      if( $f !~ /^\// ) { $f = "$WORK/$f"; }
+
+      $symlink_files{$g} = $f;
+    }
+  }
+  if($DEBUG && %symlink_files) {
+    print "\nNeed to create soft links for these files:\n";
+    foreach $f (keys(%symlink_files)) { print "\t\t$f\t\t$symlink_files{$f}\n"; }
+  }
+}
+#-------------------------------------------------------------------------
+sub next_case() {
+  ##### iterator for looping over cases
+  my $k, $j;
+  if( $KASE==0 || $KASE>$NCASES ) {
+    # initialize 
+    $KASE = 1;
+    for( $k=0; $k<$NSYM; $k++) { $INDEX[$k]=0; }
+  }
+  else {
+    # increment the indices for each variable
+    $KASE++;
+
+    if( $NCASES_INNER<=1 || $KASE%$NCASES_INNER==1 ) {
+      # reset inner params, then increment 1 outer param
+      for( $k=0; $k<$NSYM; $k++ ) {
+        if( $data{$SYM[$k]}[2] eq 'inner' ) { $INDEX[$k] = 0; }
+      }
+      for( $k=0; $k<$NSYM; $k++ ) {
+        if( $data{$SYM[$k]}[2] eq 'outer' ) { $INDEX[$k]++; last; }
+      }
+      for( $k=0; $k<$NSYM-1; $k++ ) {
+        if( $data{$SYM[$k]}[2] eq 'outer' ) {
+          if( $INDEX[$k] < &symcon($data{$SYM[$k]}[3]) ) { last; }
+          $INDEX[$k] = 0;
+          for( $j=$k+1; $j<$NSYM; $j++ ) {
+            if( $data{$SYM[$j]}[2] eq 'outer' ) { $INDEX[$j]++; last; }
+          }
+        }
+      }
+    }
+    else {
+      # increment inner params
+      for( $k=0; $k<$NSYM; $k++ ) {
+        if( $data{$SYM[$k]}[2] eq 'inner' ) {
+          if( $INDEX[$k] < &symcon($data{$SYM[$k]}[3])-1 ) { $INDEX[$k]++; }
+        }
+      }
+    }
+    # fixup tied lists
+    for( $k=0; $k<$NSYM; $k++ ) {
+      if( $data{$SYM[$k]}[2] ne 'inner' && $data{$SYM[$k]}[2] ne 'outer' ) {
+        $INDEX[$k] = $INDEX[ $data{$SYM[$k]}[2] ];
+      }
+    }
+  }
+  return $KASE;
+}
+#-------------------------------------------------------------------------
+sub  symcon() {
+  # If arg is integer, return it.
+  # If not, try 1 level substitution - constant only.
+  my $s = $_[0];
+  my $j; 
+  if( $s =~ /\d+/ ) { return $s; }
+  for( $j=0; $j<$NSYM; $j++ ) {
+    if( $s eq $SYM[$j] ) {
+      if( $data{$s}[1] eq 'constant' ) {
+        $s = $data{$s}[4];
+        if( $s =~ /\d+/ ) { return $s; }
+      }
+      # error if symbol not already defined constant integer
+      die("*** error: can't use non-constant to define control var\n");
+    }
+  }
+  return $s;
+}
+#-------------------------------------------------------------------------
+sub symsub() {
+  # make substitutions based on previously defined vars
+  my( $last, $expr ) = @_;
+  my $j, $s, $v;
+  for( $j=0; $j<$last; $j++ ) {
+    $s = $SYM[$j];
+    $v = $VAL[$KASE][$j];
+    $expr =~ s/\b$s\b/$v/g;
+  }
+  return $expr;
+}
+#-------------------------------------------------------------------------
+sub  get_case_params() {
+  ##### determine the substitutions for this case
+  my $j, $k, $s, $v, $ave, $sig;
+  my $sym, $typ, $num, $val, $expr, $xmin, $xmax, $a, $b, $ga, $gb;
+  my $pi = 3.14159265358979323844;
+
+  # determine all the parameters
+  STARTOVER: {
+    for($k=0; $k<$NSYM; $k++ ) {
+      $sym = $SYM[$k];
+      $typ = $data{$sym}[1];
+      $num = &symcon( $data{$sym}[3] );
+  
+      if(    $typ =~ /constraint/ ) {
+        # substitute defined parameters into expr
+        $expr = &symsub( $k, $data{$sym}[4] );
+        # if expr not true, start over
+        if( ! eval( $expr ) ) { goto STARTOVER;}
+      }
+      elsif( $typ =~ /^normal/ ) {
+        $ave = &symsub( $k, $data{$sym}[4] );
+        $sig = &symsub( $k, $data{$sym}[5] );
+        $val = $ave + $sig*sqrt(-2.*log(rand))*sin(2.*$pi*rand);
+      }
+      elsif( $typ =~ /lognormal/ ) {
+        $ave = &symsub( $k, $data{$sym}[4] );
+        $sig = &symsub( $k, $data{$sym}[5] );
+        $val = exp( $ave + $sig*sqrt(-2.*log(rand))*sin(2.*$pi*rand) );
+      }
+      elsif( $typ =~ /uniform/ ) {
+        $xmin= &symsub( $k, $data{$sym}[4] );
+        $xmax= &symsub( $k, $data{$sym}[5] );
+        $val = $xmin + ($xmax-$xmin)*rand;
+      }
+      elsif( $typ =~ /beta/    ) {
+        $a   = &symsub( $k, $data{$sym}[4] );
+        $b   = &symsub( $k, $data{$sym}[5] );
+        $ga=1; foreach $j ((1..$a)) {$ga*=rand;}; $ga=-log($ga);
+        $gb=1; foreach $j ((1..$b)) {$gb*=rand;}; $gb=-log($gb);
+        $val = $ga / ($ga + $gb);
+      }
+      elsif( $typ =~ /constant/ ) {
+        $val = &symsub( $k, $data{$sym}[4] );
+      }
+      elsif( $typ =~ /list/ ) {
+        $val = &symsub( $k, $data{$sym}[4+$INDEX[$k]] );
+      }
+      elsif( $typ =~ /eval/ ) {
+        $expr = &symsub( $k, $data{$sym}[4] );
+        $val  = eval( $expr );
+      }
+      elsif( $typ =~ /tied/ ) {
+        next;
+      }
+      $VAL[$KASE][$k] = $val;
+    }
+  }
+  if( $DEBUG ) {
+    # print case info
+    print "\n***** Case = $KASE,     Substitutions:\n";
+    for( $k=0; $k<$NSYM; $k++ ) {
+      $s = $SYM[$k];
+      $v = $VAL[$KASE][$k];
+      if( $s =~ /^C-\d+$/ ) { next; }
+      if( $s =~ /^T-\d+$/ ) { next; }
+      print "\t\t$s\t$v\n";
+    }
+  }
+}
+#-------------------------------------------------------------------------
+sub  substitute_case_params() {
+  # scan the input file & substitute the case parameters
+  my $k, $s, $v;
+  print "\n***** Case = $KASE,  Create file:  $OUT\n";
+  open( IN,  "<$IN")  || die("$0: can't open $IN\n");
+  open( OUT, ">$OUT") || die("$0: can't open $OUT\n");
+  while( <IN> ) {
+    # trim trailing whitespace
+    s/\s+\n/\n/g;
+    # for DOS files, ignore carriage returns
+    s/\r//g;
+    # skip lines with leading "c @@@ "
+    if( /^c +@@@/i ) { next; }
+    # make the substitutions
+    for($k=0; $k<$NSYM; $k++ ) {
+      $s = $SYM[$k];
+      $v = $VAL[$KASE][$k];
+      if( $s =~ /^C-\d+$/ ) { next; }
+      s/\b$s\b/$v/g;
+    }
+    # prevent infinite loop: if no \n on (last) line, then add one
+    if( ! /\n/ ) { $_ .= "\n"; }
+
+    # if there are embedded new-lines, do each piece
+    while( length($_)>0 && index($_,"\n",0)<=length($_)-1 ) {
+      my $p = substr($_,0,index($_,"\n",0)+1,'');
+      # wrap lines at 75 chars, but don't split-up comments
+      if( $p !~ /^ {0,4}c /i ) {
+        until( length($p)<=75 ) {
+          my $k = rindex( $p, ' ', 75 );
+          my $j =  index( $p, '$',  0 );
+          if( $j>0 && $j<$k ) { $k=$j; }
+          print OUT substr($p,0,$k,'     '),"\n";
+        }
+      }
+      print OUT $p;
+    }
+  }
+  close(IN);
+  close(OUT);
+}
+#-------------------------------------------------------------------------
+sub collect_results() {
+  $NTAL  = 0;    # note - global var
+  $NPERT = 0;    # note - global var
+  $KCODE = 0;    # note - global var
+  { ##### combined Keff & std dev for this case
+    my @RKPL, @line, $NC, $IKZ, $MK, $n, $k;
+    open(MCTAL,"<$CASEDIR/mctal");
+    while( <MCTAL> ) {
+      if( /^kcode *(\d+) *(\d+) *(\d+)/ ) {
+        $KCODE = 1;
+        $NC    = $1;
+        $IKZ   = $2;
+        $MK    = $3;
+        while( <MCTAL> ) {
+          chop;
+          s/^ //;
+          s/  +/ /g;
+          @line = split;
+          foreach $k (@line) { push @RKPL, $k; }
+        }
+      }
+    }
+    close(MCTAL);
+    if( $KCODE ) {
+      $j = $MK*($NC-1) + 11;
+      $KEFF[$KASE] = $RKPL[$j];
+      $KSIG[$KASE] = $RKPL[$j+1];
+    }
+  }
+  { ##### get tally results & std-dev for this case
+    my @TALS, @line, $ktal, $k, $p, $t;
+    open(MCTAL,"<$CASEDIR/mctal");
+    while( <MCTAL> ) {
+      if( /^\s*ntal\s+(\d+)(?:\s+npert\s+(\d+))?/i ) {
+        $NTAL = $1;
+        $NPERT= $2 || 0;
+        last;
+      }
+    }
+    for( $t=0; $t<$NTAL; $t++ ) {
+      while( <MCTAL> ) { if( /^tally *(\d+)/i ) { $ktal=$1; last; } }
+      for( $p=0; $p<=$NPERT; $p++ ) {
+        while( <MCTAL> ) {
+          if( /^vals/i ) {
+            undef @TALS;
+            while( <MCTAL> ) {
+              if( /^tfc/i ) { last; }
+              chop;
+              s/  +/ /g;
+              s/^ //;
+              @line = split;
+              push @TALS, @line; 
+            }
+            if( $DEBUG ) {
+              for( $k=0; $k<@TALS; $k+=2 ) {
+                print "\ttal\t$ktal\t$p\t$k\t$TALS[$k]\t$TALS[$k+1]\n";
+              }
+            }
+            $TAL_LEN{$ktal} = @TALS / 2;
+            for( $k=0; $k<@TALS; $k+=2 ) {
+              $TAL_AVE{$KASE}{$ktal}[$p][$k/2] = $TALS[$k];
+              $TAL_SIG{$KASE}{$ktal}[$p][$k/2] = $TALS[$k+1];
+            }
+            last;
+          }
+        }
+      }
+    }
+    close(MCTAL);
+  }
+}
+#-------------------------------------------------------------------------
+sub print_results() {
+
+  if( $KCODE ) {
+    my $k, $ksum, $ksum2 ;
+    for( $k=1; $k<=$NCASES; $k++ ) {
+      print     "$CASENAMES[$k]\tKEFF\t$KEFF[$k]\tKSIG\t$KSIG[$k]\n";
+      print LOG "$CASENAMES[$k]\tKEFF\t$KEFF[$k]\tKSIG\t$KSIG[$k]\n";
+      $ksum  += $KEFF[$k];
+      $ksum2 += $KEFF[$k]**2;
+    }
+    # get the average Keff & sig
+    if( $NCASES > 1 ) {
+      $KEFF_AVE = $ksum / $NCASES;
+      $KEFF_SIG = sqrt(($ksum2/$NCASES-$KEFF_AVE**2)/($NCASES-1));
+      print     "AVERAGE\tKEFF\t$KEFF_AVE\tKSIG\t$KEFF_SIG\n";
+      print LOG "AVERAGE\tKEFF\t$KEFF_AVE\tKSIG\t$KEFF_SIG\n";
+    }
+  }
+
+  if( $NTAL ) {
+    my $kt, $tn, $ttyp;
+    for($kt=0; $kt<$NTAL; $kt++) {
+      my $n, $k, $j, @t, @t2, $p;
+      $tn   = $TAL_NUM[$kt];
+      $ttyp = $TAL_TYP[$kt];
+      $n    = $TAL_LEN{$tn};
+      print     "tally\t$tn\n";
+      print LOG "tally\t$tn\n";
+      undef  @t;
+      undef  @t2;
+      for( $k=1; $k<=$NCASES; $k++ ) {
+        if( !$AVGONLY ) {
+          print     "\t$CASENAMES[$k]\n";
+          print LOG "\t$CASENAMES[$k]\n";
+        }
+        for( $p=0; $p<=$NPERT; $p++ ) {
+          if( $NPERT && !$AVGONLY ) { print     "\t  pert $p\n"; print LOG "\t  pert $p\n"; }
+          for( $j=0; $j<$n; $j++ ) {
+            if( !$AVGONLY ) {
+              if( $ttyp eq "fp" ) {
+                printf     "  %11.5e %6.4f",$TAL_AVE{$k}{$tn}[$p][$j],$TAL_SIG{$k}{$tn}[$p][$j];
+                printf LOG "  %11.5e %6.4f",$TAL_AVE{$k}{$tn}[$p][$j],$TAL_SIG{$k}{$tn}[$p][$j];
+                if( ($j+1)%4==0 ) { print "\n"; print LOG "\n"; }
+              }
+              else {
+                print     "\t\t$TAL_AVE{$k}{$tn}[$p][$j]\t$TAL_SIG{$k}{$tn}[$p][$j]\n";
+                print LOG "\t\t$TAL_AVE{$k}{$tn}[$p][$j]\t$TAL_SIG{$k}{$tn}[$p][$j]\n";
+              }
+            }
+            $t[$p][$j]  += $TAL_AVE{$k}{$tn}[$p][$j];
+            $t2[$p][$j] += $TAL_AVE{$k}{$tn}[$p][$j]**2;
+          }
+          if( !$AVGONLY ) { print "\n"; print LOG "\n"; }
+        }
+      }
+      for( $p=0; $p<=$NPERT; $p++ ) {
+        if(!$NPERT) { print     "\tAVERAGE\n";           print LOG "\tAVERAGE\n"; }
+        else        { print     "\tAVERAGE - pert $p\n"; print LOG "\tAVERAGE - pert $p\n"; }
+        for( $j=0; $j<$n; $j++ ) {
+          my $q =  $t[$p][$j]/$NCASES;
+          my $r = $t2[$p][$j]/$NCASES - $q**2;
+          if(    $q==0 || $r<=0 ) { $r = 0.0; }
+          elsif( $NCASES<=1     ) { $r = 1.0; }
+          else                    { $r = sqrt($r/($NCASES-1)) / abs($q); }
+          if( $ttyp eq "fp" ) {
+            printf     "  %11.5e %6.4f",$q,$r;
+            printf LOG "  %11.5e %6.4f",$q,$r;
+            if( ($j+1)%4==0 ) { print "\n"; print LOG "\n"; }
+          }
+          else {
+            printf     "\t\t%11.5e\t%6.4f\n", $q,$r;
+            printf LOG "\t\t%11.5e\t%6.4f\n", $q,$r;
+          }
+        }
+        print "\n"; print LOG "\n";
+      }
+    }
+  }
+}
+#-------------------------------------------------------------------------
+
