@@ -8,7 +8,7 @@ c
 c
 c  128 log-spaced energy points from 1e-12 to 1e3 MeV 
 c 
-c @@@ OPTIONS =   -jobdir /mnt/nfs/home/zeitz_d/BSS_NEU/Resp/vary_inner_outer_pe/35W_full
+c @@@ OPTIONS =   -jobdir /mnt/nfs/home/zeitz_d/BSS_NEU/Resp/TSS
 c @@@ ENERGY_POS =   1.0000E-12  1.7227E-12  2.9678E-12 \
 c @@@                5.1128E-12  8.8081E-12  1.5174E-11 \
 c @@@                2.6141E-11  4.5034E-11  7.7583E-11 \
@@ -34,7 +34,7 @@ c @@@                7.6189E+02  1.0000E+03
 c
 c @@@ SOURCE_POS =   0 
 c @@@ DENSITY_FACTOR = 1.0
-c @@@ THICKNESS_OUTER_PE = 8.0
+c @@@ THICKNESS_OUTER_PE = 7.5
 c @@@ THICKNESS_INNER_W = 2.5
 c
 c @@@ PE_DENSITY = (DENSITY_FACTOR * (-0.964) )
@@ -116,7 +116,7 @@ c 7 inches
  20050 0    -20050 +20045 (10561:-10507:10533) imp:n=1
  20045 0     -20045 +20040 (10561:-10507:10533) imp:n=1
  20040 112 -2.2   -20040 +20035 (10561:-10507:10533) imp:n=1
- 20035 111 -13.03    -20035 +20030 (10551:10507:-10511) 
+ 20035 111 -11.83    -20035 +20030 (10551:10507:-10511) 
                                    (10561:-10507:10533) imp:n=4
  20030 113 -1.24    -20030 10542 (10551:10507:-10511)
                                    (10561:-10507:10521)  imp:n=8     $ innere PE-Kugel
@@ -180,7 +180,7 @@ c
 c Concentric layers
 20030 109 SO THICKNESS_INNER_W  $ 3 inches D
 20035 109 SO THICKNESS_OUTER_PE $ 3.5 inches D
-20040 109 SO 9.5  $ 4 inches D
+20040 109 SO 8.5  $ 4 inches D
 20045 109 SO 9.55 $ 4.5 inches D
 20050 109 SO 9.6  $ 5 inches D
 20060 109 SO 9.65  $ 6 inches D
@@ -221,7 +221,7 @@ si1   L   ENERGY_POS
 sp1           1    
 c
 c radial dists
-si2          0 9.5  $ CORR RAD
+si2          0 8.5  $ CORR RAD
 c
 c
 tr1 -20 SOURCE_POS 0
@@ -309,25 +309,24 @@ M107   1001.60c -3.3E-3
 MT107  lwtr.01t	                        $ H in light water bei 300 K
 M108   29000.50c 1.00                   $ Copper
 M110   82000 1.00                       $ Lead
-M111    1001.60c   0.08888822             $H
-        6000.60c   0.0666666666           $C
-        8016.60c   0.4444444411             $O Polylactic acid == (C3H4O2)n
+M111    1001.60c   0.2822222222             $H
+        6000.60c   0.20866666666           $C
+        8016.60c   0.1431111111         $O Polylactic acid == (C3H4O2)n
         5011.60c   0.04000000                 $B
         6000.60c   0.01000000               $C
-        74000.21c  0.750000                    $Wc
-MT111  lwtr.01t	                       $ H in light water bei 300 K
+        74000.21c  0.50000                    $Wc
+        822000     0.150000                  $Lead
+MT111  lwtr.01t                        $ H in light water bei 300 K
 M112 nlib=60c
-       1001.60c   0.111111
-       6000.60c   0.083333
-       8016.60c   0.055111                $PLA 50%
-       5011.60c   0.6                 $B
-       6000.60c   0.150000               $C 50%
+       1001.60c   0.2222
+       6000.60c   0.16666
+       8016.60c   0.11111                $PLA 50%
+       5011.60c   0.4                 $B
+       6000.60c   0.100000               $C 50%
 MT112  poly.01t
 M113  1001.60c    0.44444
       6000.60c    0.33333
       8016.60c    0.22222
-MT113  poly.01t
-c
 c Tally Stuff
 c
 fc11 bonner sphere outer surface
